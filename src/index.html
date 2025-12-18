@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Go WASM ACO - Network Optimization</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        h1 { color: #333; }
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        canvas {
+            background-color: #ffffff;
+            border: 1px solid #ccc;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-radius: 4px;
+        }
+        .stats {
+            margin-top: 10px;
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #444;
+        }
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        
+        /* 危険度/重みの凡例用 */
+        .legend { font-size: 0.8em; color: #666; margin-left: 10px; }
+    </style>
+</head>
+<body>
+
+    <h1>WASM Ant Colony Optimization</h1>
+
+    <div class="controls">
+        <div>
+            <label for="nodeCount">都市(ノード)数: <span id="nodeVal">20</span></label>
+            <br>
+            <input type="range" id="nodeCount" min="5" max="100" value="20">
+        </div>
+        <button id="btnInit" onclick="initSimulation()">マップ再生成</button>
+        <button id="btnToggle" onclick="toggleSimulation()" disabled>スタート</button>
+        <span class="legend">※ 太い線ほど通りにくい(コスト高)</span>
+    </div>
+
+    <canvas id="mainCanvas" width="800" height="600"></canvas>
+
+    <div class="stats">
+        Best Distance: <span id="bestDist">---</span>
+    </div>
+
+    <script src="wasm_exec.js"></script>
+    <script>
+        const go = new Go();
+        let wasmLoaded = false;
+        let isRunning = false;
+        let animationId = null;
+
+        // キャンバス設定
+        const canvas = document.getElementById("mainCanvas");
+        const ctx = canvas.getContext("2d");
+        const CANVAS_WIDTH = canvas.width;
+        const CANVAS_HEIGHT = canvas.height;
+        const SCALE_X = CANVAS_WIDTH / 100; // Goの座標(0-100)をキャンバスに合わせる
+        const SCALE_Y = CANVAS_HEIGHT / 100;
+
+        // UI要素
+        const slider = document.getElementById("nodeCount");
+        const nodeVal = document.getElementById("nodeVal");
+        const btnToggle = document.getElementById("btnToggle");
+        const distDisplay = document.getElementById("bestDist");
+
+        // スライダー表示更新
+        slider.oninput = function() { nodeVal.textContent = this.value; };
+
+        // WASMのロード
+        WebAssembly.instantiateStreaming(fetch("main.wasm"), go.importObject).then((result) => {
+            go.run(result.instance);
+            wasmLoaded = true;
+            console.log("WASM Loaded");
+            
+            // 初回初期化
+            initSimulation();
+        }).catch(err => {
+            console.error("WASM Load Error:", err);
+            alert("WASMのロードに失敗しました。wasm_exec.jsがあるか、Live Serverで開いているか確認してください。");
+        });
+
+        // シミュレーション初期化（マップ生成）
+        function initSimulation() {
+            if (!wasmLoaded) return;
+            stopAnimation();
+
+            const count = parseInt(slider.value);
+            // Go側の関数呼び出し
+            initACO(count);
+
+            // 初期の地図を描画
+            drawScene(null); // パスなしで地図だけ描く
+            
+            distDisplay.innerText = "---";
+            btnToggle.disabled = false;
+        }
+
+        // スタート・ストップ切り替え
+        function toggleSimulation() {
+            if (isRunning) {
+                stopAnimation();
+            } else {
+                startAnimation();
+            }
+        }
+
+        function startAnimation() {
+            isRunning = true;
+            btnToggle.textContent = "ストップ";
+            btnToggle.style.backgroundColor = "#dc3545"; // 赤色へ
+            loop();
+        }
+
+        function stopAnimation() {
+            isRunning = false;
+            btnToggle.textContent = "スタート";
+            btnToggle.style.backgroundColor = "#007bff"; // 青色へ
+            if (animationId) cancelAnimationFrame(animationId);
+        }
+
+        // アニメーションループ
+        function loop() {
+            if (!isRunning) return;
+
+            // 1. Go側の計算を1ステップ進める
+            // stepACO() は {bestDist: float, bestPath: [int]} のJSON文字列を返す
+            const resStr = stepACO();
+            const res = JSON.parse(resStr);
+
+            // 2. 描画更新
+            if (res.bestPath) {
+                distDisplay.innerText = res.bestDist.toFixed(2);
+                drawScene(res.bestPath);
+            }
+
+            animationId = requestAnimationFrame(loop);
+        }
+
+        // 描画関数（背景の地図 + 最適経路）
+        function drawScene(bestPathIndices) {
+            // Goからグラフデータ全体（ノードとエッジ）を取得
+            // { nodes: [...], edges: [...] }
+            const graphStr = getGraph();
+            const graph = JSON.parse(graphStr);
+
+            // 画面クリア
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            if (!graph.nodes || !graph.edges) return;
+
+            // --- 1. エッジ（道路）の描画 ---
+            graph.edges.forEach(edge => {
+                const u = graph.nodes[edge.from];
+                const v = graph.nodes[edge.to];
+
+                ctx.beginPath();
+                ctx.moveTo(u.x * SCALE_X, u.y * SCALE_Y);
+                ctx.lineTo(v.x * SCALE_X, v.y * SCALE_Y);
+
+                // 重み(weight)に応じて太さを変える
+                // 重みは距離 * 交通係数(1.0~3.0) なので、距離で割ると純粋な「混雑度」が出るが、
+                // ここでは単純に weight をある程度スケーリングして太さにする
+                // 例: 基本1px, 重いと最大5px
+                const visualWeight = Math.min(6, Math.max(1, edge.weight / 10)); 
+                
+                ctx.lineWidth = visualWeight;
+                ctx.strokeStyle = visualWeight > 3 ? "#ccc" : "#eee"; // 太い道は濃いグレー
+                ctx.stroke();
+            });
+
+            // --- 2. ベストパス（最適経路）のハイライト ---
+            if (bestPathIndices && bestPathIndices.length > 0) {
+                ctx.beginPath();
+                const startNode = graph.nodes[bestPathIndices[0]];
+                ctx.moveTo(startNode.x * SCALE_X, startNode.y * SCALE_Y);
+
+                for (let i = 1; i < bestPathIndices.length; i++) {
+                    const node = graph.nodes[bestPathIndices[i]];
+                    ctx.lineTo(node.x * SCALE_X, node.y * SCALE_Y);
+                }
+                // TSPなので最後は最初に戻る線を引く
+                ctx.lineTo(startNode.x * SCALE_X, startNode.y * SCALE_Y);
+
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = "rgba(255, 69, 0, 0.8)"; // オレンジ赤
+                ctx.lineJoin = "round";
+                ctx.stroke();
+            }
+
+            // --- 3. ノード（都市）の描画 ---
+            graph.nodes.forEach(node => {
+                const px = node.x * SCALE_X;
+                const py = node.y * SCALE_Y;
+
+                ctx.beginPath();
+                ctx.arc(px, py, 6, 0, 2 * Math.PI);
+                ctx.fillStyle = "#333"; // 黒丸
+                ctx.fill();
+                ctx.strokeStyle = "white";
+                ctx.stroke();
+
+                // ID番号を表示（デバッグ用・見た目用）
+                ctx.fillStyle = "white";
+                ctx.font = "10px Arial";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(node.id, px, py);
+            });
+        }
+    </script>
+</body>
+</html>
