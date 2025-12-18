@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// NewACO: ランダムなネットワークグラフを生成して初期化
 func NewACO(nodeCount int) *ACO {
 	randSource := rand.New(rand.NewSource(time.Now().UnixNano()))
 
@@ -25,51 +24,55 @@ func NewACO(nodeCount int) *ACO {
 	// 2. 行列初期化
 	distances := make([][]float64, nodeCount)
 	pheromones := make([][]float64, nodeCount)
-
 	for i := 0; i < nodeCount; i++ {
 		distances[i] = make([]float64, nodeCount)
 		pheromones[i] = make([]float64, nodeCount)
-
 		for j := 0; j < nodeCount; j++ {
-			distances[i][j] = math.Inf(1) // 初期状態は接続なし
+			distances[i][j] = math.Inf(1)
 			pheromones[i][j] = 0.0
 		}
 	}
 
 	edges := []Edge{}
+	
+	// 座標(100x100)における最大ユークリッド距離 (ルート20000)
+	const MaxEuclideanDist = 141.421356
 
-	// エッジ追加ヘルパー関数
 	addEdge := func(u, v int) {
-		// 既に接続済みなら何もしない
-		if distances[u][v] != math.Inf(1) {
-			return
+		if distances[u][v] != math.Inf(1) { return }
+		
+		// 実際のユークリッド距離を計算
+		rawDist := math.Hypot(nodes[u].X-nodes[v].X, nodes[u].Y-nodes[v].Y)
+		
+		// ★変更点: 重みを0-1に正規化して設定
+		normalizedWeight := rawDist / MaxEuclideanDist
+		
+		// 重みが0になりすぎると計算(1/dist)でバグるので極小値を保証
+		if normalizedWeight < 0.0001 {
+			normalizedWeight = 0.0001
 		}
 
-		dist := math.Hypot(nodes[u].X-nodes[v].X, nodes[u].Y-nodes[v].Y)
-		trafficFactor := 1.0 + randSource.Float64()*2.0
-		weight := dist * trafficFactor
-
-		distances[u][v] = weight
-		distances[v][u] = weight
+		distances[u][v] = normalizedWeight
+		distances[v][u] = normalizedWeight
 		pheromones[u][v] = InitialPheromone
 		pheromones[v][u] = InitialPheromone
-
-		edges = append(edges, Edge{From: u, To: v, Weight: weight})
+		
+		// JSには正規化後の重みを送りますが、
+		// 距離表示のためにJS側で再計算させるか、ここでrawを送る手もあります。
+		// 今回は仕様通り正規化した値をWeightに入れます。
+		edges = append(edges, Edge{From: u, To: v, Weight: normalizedWeight})
 	}
 
-	// リング状に接続（孤立防止）
+	// グラフ生成（連結リング）
 	for i := 0; i < nodeCount; i++ {
 		addEdge(i, (i+1)%nodeCount)
 	}
-
-	// ランダムなショートカットを追加
-	extraEdges := nodeCount * 2
+	// ショートカット生成
+	extraEdges := nodeCount * 3
 	for i := 0; i < extraEdges; i++ {
 		u := randSource.Intn(nodeCount)
 		v := randSource.Intn(nodeCount)
-		if u != v {
-			addEdge(u, v)
-		}
+		if u != v { addEdge(u, v) }
 	}
 
 	return &ACO{
@@ -79,38 +82,40 @@ func NewACO(nodeCount int) *ACO {
 		BestDist:   math.MaxFloat64,
 		BestPath:   nil,
 		Rand:       randSource,
+		StartNode:  0,
+		GoalNode:   nodeCount - 1,
 	}
 }
 
-// Step: 1世代分のシミュレーションを実行
+// Step: A地点からB地点への探索
 func (aco *ACO) Step() {
 	n := len(aco.Graph.Nodes)
 
 	type AntResult struct {
 		Path []int
 		Dist float64
+		Success bool // ゴールできたか？
 	}
 	antResults := make([]AntResult, AntCount)
 
-	// 1. 全てのアリが解を構築
+	// 1. 全てのアリがスタートからゴールを目指す
 	for k := 0; k < AntCount; k++ {
-		path := aco.constructSolution(n)
+		path, success := aco.constructSolution()
 		
-		// 経路が見つからなかった場合（袋小路など）のガード
-		if len(path) != n {
-			antResults[k] = AntResult{Path: nil, Dist: math.Inf(1)}
+		if !success {
+			antResults[k] = AntResult{Success: false}
 			continue
 		}
 
 		dist := aco.calculatePathDistance(path)
-		antResults[k] = AntResult{Path: path, Dist: dist}
+		antResults[k] = AntResult{Path: path, Dist: dist, Success: true}
 
 		if dist < aco.BestDist {
 			aco.BestDist = dist
 			bestPath := make([]int, len(path))
 			copy(bestPath, path)
 			aco.BestPath = bestPath
-			fmt.Printf("New Best Distance: %.2f\n", aco.BestDist)
+			fmt.Printf("New Best Path Found! Distance: %.2f (Nodes: %d)\n", aco.BestDist, len(path))
 		}
 	}
 
@@ -123,42 +128,49 @@ func (aco *ACO) Step() {
 		}
 	}
 
-	// 3. フェロモン更新
+	// 3. フェロモン更新（ゴールできたアリのみ！）
 	for _, result := range antResults {
-		if result.Path == nil { continue }
+		if !result.Success { continue } // 失敗したアリはフェロモンを残さない
 		
 		deposit := Q / result.Dist
-		for i := 0; i < n-1; i++ {
+		for i := 0; i < len(result.Path)-1; i++ {
 			u, v := result.Path[i], result.Path[i+1]
 			aco.Pheromones[u][v] += deposit
 			aco.Pheromones[v][u] += deposit
 		}
-		// 始点に戻るエッジ
-		u, v := result.Path[n-1], result.Path[0]
-		aco.Pheromones[u][v] += deposit
-		aco.Pheromones[v][u] += deposit
 	}
 }
 
-func (aco *ACO) constructSolution(numNodes int) []int {
-	path := make([]int, 0, numNodes)
-	visited := make([]bool, numNodes)
+// constructSolution: スタートからゴールへの経路を探索
+func (aco *ACO) constructSolution() ([]int, bool) {
+	path := []int{aco.StartNode}
+	visited := make([]bool, len(aco.Graph.Nodes))
+	visited[aco.StartNode] = true
+	
+	current := aco.StartNode
 
-	current := aco.Rand.Intn(numNodes)
-	path = append(path, current)
-	visited[current] = true
+	// 最大ステップ数制限（無限ループ防止）
+	maxSteps := len(aco.Graph.Nodes) * 2
 
-	for len(path) < numNodes {
-		next := aco.selectNextCity(current, visited)
-		if next == -1 {
-			// 行き止まり（通常リング構造なので起きないはずだが安全のため）
-			break
+	for step := 0; step < maxSteps; step++ {
+		// ゴール到達チェック
+		if current == aco.GoalNode {
+			return path, true
 		}
+
+		next := aco.selectNextCity(current, visited)
+		
+		if next == -1 {
+			// 行き止まり
+			return nil, false
+		}
+
 		path = append(path, next)
-		visited[next] = true
+		visited[next] = true // 訪問済みにする（ループ防止）
 		current = next
 	}
-	return path
+
+	return nil, false // ステップオーバー
 }
 
 func (aco *ACO) selectNextCity(current int, visited []bool) int {
@@ -166,8 +178,9 @@ func (aco *ACO) selectNextCity(current int, visited []bool) int {
 	probabilities := make([]float64, n)
 	sumProb := 0.0
 
+	// 隣接ノードのみを候補にする
 	for i := 0; i < n; i++ {
-		// 未訪問 かつ エッジが存在する場合のみ
+		// 未訪問 かつ 接続あり
 		if !visited[i] && aco.Distances[current][i] != math.Inf(1) {
 			pheromone := math.Pow(aco.Pheromones[current][i], Alpha)
 			heuristic := math.Pow(1.0/aco.Distances[current][i], Beta)
@@ -177,27 +190,19 @@ func (aco *ACO) selectNextCity(current int, visited []bool) int {
 		}
 	}
 
-	// 移動可能な先がない場合
-	if sumProb == 0.0 {
-		return -1
-	}
+	if sumProb == 0.0 { return -1 }
 
 	r := aco.Rand.Float64() * sumProb
 	cumulative := 0.0
 	for i := 0; i < n; i++ {
 		if !visited[i] && aco.Distances[current][i] != math.Inf(1) {
 			cumulative += probabilities[i]
-			if cumulative >= r {
-				return i
-			}
+			if cumulative >= r { return i }
 		}
 	}
-
-	// 浮動小数点誤差対策
+	// 誤差対策のフォールバック
 	for i := 0; i < n; i++ {
-		if !visited[i] && aco.Distances[current][i] != math.Inf(1) {
-			return i
-		}
+		if !visited[i] && aco.Distances[current][i] != math.Inf(1) { return i }
 	}
 	return -1
 }
@@ -207,6 +212,6 @@ func (aco *ACO) calculatePathDistance(path []int) float64 {
 	for i := 0; i < len(path)-1; i++ {
 		dist += aco.Distances[path[i]][path[i+1]]
 	}
-	dist += aco.Distances[path[len(path)-1]][path[0]]
+	// TSPではないので、最後にスタートに戻る距離は足さない
 	return dist
 }

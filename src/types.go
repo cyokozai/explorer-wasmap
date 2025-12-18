@@ -5,14 +5,13 @@ import (
 	"math/rand"
 )
 
-
 const (
-	AntCount         = 20    // アリの数
-	Alpha            = 1.0   // フェロモンの重要度
-	Beta             = 5.0   // ヒューリスティックの重要度
-	Evaporation      = 0.5   // フェロモンの蒸発率
-	Q                = 100.0 // フェロモン更新定数
-	InitialPheromone = 1.0   // フェロモンの初期値
+	AntCount         = 20
+	Alpha            = 1.0
+	Beta             = 5.0
+	Evaporation      = 0.5
+	Q                = 100.0
+	InitialPheromone = 1.0
 )
 
 type Node struct {
@@ -34,9 +33,11 @@ type GraphData struct {
 
 type ACO struct {
 	Graph      GraphData
-	Distances  [][]float64 // 距離行列 (接続なしは Inf)
-	Pheromones [][]float64 // フェロモン行列
-	BestDist   float64     // これまでの最短距離
-	BestPath   []int       // これまでの最短経路
-	Rand       *rand.Rand  // 乱数生成器
+	Distances  [][]float64
+	Pheromones [][]float64
+	BestDist   float64
+	BestPath   []int
+	Rand       *rand.Rand
+	StartNode  int
+	GoalNode   int
 }
